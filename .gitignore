@@ -1,0 +1,11 @@
+build/build_arm64/
+build/build_ios/
+build/build_osx/
+build/build_v7a/cmake_install.cmake
+build/build_v7a/CMakeCache.txt
+build/build_v7a/
+build/build_x86/
+build/build32/
+build/build64/
+build/luac/build_unix/
+build/luac/build64/
