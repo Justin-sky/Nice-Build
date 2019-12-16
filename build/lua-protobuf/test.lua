@@ -96,7 +96,7 @@ function _G.test_io.test()
    fail("string expected for field 'name', got boolean",
         function() pb.encode("Person", { name = true }) end)
 
-   fail("type mismatch at offset 2, bytes expected for type string, got varint",
+   fail("type mismatch for field 'name' at offset 2, bytes expected for type string, got varint",
         function() pb.decode("Person", "\8\1") end)
 
    fail("invalid varint value at offset 2",
@@ -242,6 +242,7 @@ function _G.test_extend()
 end
 
 function _G.test_type()
+   pb.clear "not-exists"
    check_load [[
    message TestTypes {
       optional double   dv    = 1;
@@ -349,6 +350,8 @@ function _G.test_default()
          })
    pb.clear "TestDefault"
    pb.clear "TestDefaultColor"
+   fail("type not found",
+      function() pb.defaults "-invalid-type-" end)
 
    check_load [[
       syntax = "proto3";
@@ -374,6 +377,8 @@ function _G.test_default()
          repeated int32 array = 18;
       } ]]
 
+   local _, _, _, _, rep = pb.field("TestDefault", "foo")
+   eq(rep, "optional")
    table_eq(copy_no_meta(pb.defaults "TestDefault"), {
             defaulted_int = 0,
             defaulted_bool = false,
@@ -784,6 +789,13 @@ function _G.test_buffer()
    assert(#b:reset() == 0)
    assert(tostring(b):match 'pb.Buffer')
 
+   b = buffer.new "foo"
+   assert(#b == 3)
+   b:delete()
+   assert(#b == 0)
+   b:pack("vvv", 1,2,3)
+   assert(#b == 3)
+
    b = buffer.new()
    eq(b:pack("(vvv)", 1,2,3):tohex(-4), "03 01 02 03")
    eq(b:pack("((vvv))", 1,2,3):tohex(-5), "04 03 01 02 03")
@@ -900,15 +912,111 @@ function _G.test_slice()
    assert(pb.type ".google.protobuf.FileDescriptorSet")
 end
 
+function _G.test_typefmt()
+   -- load schema from text
+   assert(protoc:load [[
+      message Phone {
+      optional string name        = 1;
+      optional int64  phonenumber = 2;
+      }
+      message Person {
+      optional string name     = 1;
+      optional int32  age      = 2;
+      optional string address  = 3;
+      repeated Phone  contacts = 4;
+      } ]])
+
+   -- lua table data
+   local data = {
+      name = "ilse",
+      age  = 18,
+      contacts = {
+         { name = "alice", phonenumber = 12312341234 },
+         { name = "bob",   phonenumber = 45645674567 }
+      }
+   }
+
+   local bytes = assert(pb.encode("Person", data))
+   local s = require "pb.slice".new(bytes)
+   local function decode(type, s, data)
+      while #s > 0 do
+         local offset, tag = s:unpack"@v"
+         local name, _, pbtype = pb.field(type, math.floor(tag / 8))
+         local fmt = pb.typefmt(pbtype)
+         if fmt == "message" then
+            s:enter()
+            if data[name][1] then
+               decode(pbtype, s, data[name][1])
+               table.remove(data[name], 1)
+            end
+            s:leave()
+         else
+            assert(data[name] == s:unpack(fmt))
+         end
+      end
+   end
+   decode("Person", s, data)
+
+   assert(pb.typefmt'F' == "double"  )
+   assert(pb.typefmt'f' == "float"   )
+   assert(pb.typefmt'I' == "int64"   )
+   assert(pb.typefmt'U' == "uint64"  )
+   assert(pb.typefmt'i' == "int32"   )
+   assert(pb.typefmt'X' == "fixed64" )
+   assert(pb.typefmt'x' == "fixed32" )
+   assert(pb.typefmt'b' == "bool"    )
+   assert(pb.typefmt't' == "string"  )
+   assert(pb.typefmt'g' == "group"   )
+   assert(pb.typefmt'S' == "message" )
+   assert(pb.typefmt's' == "bytes"   )
+   assert(pb.typefmt'u' == "uint32"  )
+   assert(pb.typefmt'v' == "enum"    )
+   assert(pb.typefmt'y' == "sfixed32")
+   assert(pb.typefmt'Y' == "sfixed64")
+   assert(pb.typefmt'j' == "sint32"  )
+   assert(pb.typefmt'J' == "sint64"  )
+
+   assert(pb.typefmt"varint"   == 'v')
+   assert(pb.typefmt"64bit"    == 'q')
+   assert(pb.typefmt"bytes"    == 's')
+   assert(pb.typefmt"gstart"   == '!')
+   assert(pb.typefmt"gend"     == '!')
+   assert(pb.typefmt"32bit"    == 'd')
+   assert(pb.typefmt"double"   == 'F')
+   assert(pb.typefmt"float"    == 'f')
+   assert(pb.typefmt"int64"    == 'I')
+   assert(pb.typefmt"uint64"   == 'U')
+   assert(pb.typefmt"int32"    == 'i')
+   assert(pb.typefmt"fixed64"  == 'X')
+   assert(pb.typefmt"fixed32"  == 'x')
+   assert(pb.typefmt"bool"     == 'b')
+   assert(pb.typefmt"string"   == 't')
+   assert(pb.typefmt"group"    == 'g')
+   assert(pb.typefmt"bytes"    == 's')
+   assert(pb.typefmt"uint32"   == 'u')
+   assert(pb.typefmt"enum"     == 'v')
+   assert(pb.typefmt"sfixed32" == 'y')
+   assert(pb.typefmt"sfixed64" == 'Y')
+   assert(pb.typefmt"sint32"   == 'j')
+   assert(pb.typefmt"sint64"   == 'J')
+
+   assert(pb.typefmt "whatever" == '!')
+end
+
 function _G.test_load()
    do
       local old = pb.state(nil)
       protoc.reload()
+      assert(protoc:load [[ message Test_Load1 { optional int32 t = 1; } ]])
+      assert(pb.type "Test_Load1")
+      assert(protoc:load [[ message Test_Load2 { optional int32 t = 2; } ]])
+      assert(pb.type "Test_Load2")
+      protoc.reload()
       local p = protoc.new()
-      assert(p:load [[ message Test1 { optional int32 t = 1; } ]])
-      assert(pb.type "Test1")
-      assert(p:load [[ message Test2 { optional int32 t = 2; } ]])
-      assert(pb.type "Test2")
+      assert(p:load [[ message Test_Load1 { optional int32 t = 1; } ]])
+      assert(pb.type "Test_Load1")
+      assert(p:load [[ message Test_Load2 { optional int32 t = 2; } ]])
+      assert(pb.type "Test_Load2")
       pb.state(old)
    end
 
@@ -955,17 +1063,17 @@ function _G.test_load()
             s(1), s(4), s(1), "load_test",
             s(2), s(1), "test_unknown", v(3), 1, v(4), 1)
    eq(pb.load(buf:result()), true)
-   fail("type mismatch at offset 2, <unknown> expected for type <unknown>, got varint",
+   fail("type mismatch for field 'test_unknown' at offset 2, <unknown> expected for type <unknown>, got varint",
             function() pb.decode("load_test", "\8\1") end)
-   fail("type mismatch at offset 2, <unknown> expected for type <unknown>, got 64bit",
+   fail("type mismatch for field 'test_unknown' at offset 2, <unknown> expected for type <unknown>, got 64bit",
             function() pb.decode("load_test", "\9\1") end)
-   fail("type mismatch at offset 2, <unknown> expected for type <unknown>, got bytes",
+   fail("type mismatch for field 'test_unknown' at offset 2, <unknown> expected for type <unknown>, got bytes",
             function() pb.decode("load_test", "\10\1") end)
-   fail("type mismatch at offset 2, <unknown> expected for type <unknown>, got gstart",
+   fail("type mismatch for field 'test_unknown' at offset 2, <unknown> expected for type <unknown>, got gstart",
             function() pb.decode("load_test", "\11\1") end)
-   fail("type mismatch at offset 2, <unknown> expected for type <unknown>, got gend",
+   fail("type mismatch for field 'test_unknown' at offset 2, <unknown> expected for type <unknown>, got gend",
             function() pb.decode("load_test", "\12\1") end)
-   fail("type mismatch at offset 2, <unknown> expected for type <unknown>, got 32bit",
+   fail("type mismatch for field 'test_unknown' at offset 2, <unknown> expected for type <unknown>, got 32bit",
             function() pb.decode("load_test", "\13\1") end)
 
    buf:reset()
@@ -1018,11 +1126,88 @@ function _G.test_load()
    assert(pb.type ".google.protobuf.FileDescriptorSet")
 end
 
+function _G.test_hook()
+   local old = pb.state(nil)
+   protoc.reload()
+   check_load [[
+      enum Type {
+         HOME = 1;
+         WORK = 2;
+      }
+      message Phone {
+         optional string name        = 1;
+         optional int64  phonenumber = 2;
+         optional Type   type        = 3;
+      }
+      message Person {
+         optional string name     = 1;
+         optional int32  age      = 2;
+         optional string address  = 3;
+         repeated Phone  contacts = 4;
+      } ]]
+   pb.option "enable_hooks"
+   assert(pb.hook "Phone" == nil)
+   fail("function expected, got boolean",
+        function() pb.hook("Phone", true) end)
+   fail("type not found",
+      function() pb.hook "-invalid-type-" end)
+   local function make_hook(name, func)
+      local fetch = pb.hook(name)
+      local function helper(t)
+         return func(name, t)
+      end
+      local old = pb.hook(name, helper)
+      assert(fetch == old)
+      assert(pb.hook(name) == helper)
+   end
+   local s = {}
+   make_hook("Person", function(name, t)
+      s[#s+1] = ("(%s|%s)"):format(name, t.name)
+      t.hooked = true
+   end)
+   make_hook("Phone", function(name, t)
+      s[#s+1] = ("(%s|%s|%s)"):format(name, t.name, t.phonenumber)
+      t.hooked = true
+      return t
+   end)
+   make_hook("Type", function(name, t)
+      s[#s+1] = ("(%s|%s)"):format(name, t)
+      return { type = name, value = t }
+   end)
+   local data = {
+      name = "ilse",
+      age  = 18,
+      contacts = {
+         { name = "alice", type = "HOME", phonenumber = 12312341234 },
+         { name = "bob",   type = "WORK", phonenumber = 45645674567 }
+      }
+   }
+   local res = pb.decode("Person", pb.encode("Person", data))
+   s = table.concat(s)
+   assert(s == "(Type|HOME)(Phone|alice|12312341234)"..
+      "(Type|WORK)(Phone|bob|45645674567)"..
+      "(Person|ilse)")
+   assert(res.hooked)
+   assert(res.contacts[1].hooked)
+   assert(res.contacts[2].hooked)
+   assert(type(res.contacts[1].type) == "table")
+   assert(type(res.contacts[2].type) == "table")
+   pb.state(old)
+end
+
+function _G.test_unsafe()
+   local unsafe = require "pb.unsafe"
+   assert(type(unsafe.decode) == "function")
+   fail("userdata expected, got boolean",
+      function() unsafe.decode("", true, 1)
+   end)
+end
+
 if _VERSION == "Lua 5.1" and not _G.jit then
    lu.LuaUnit.run()
 else
    os.exit(lu.LuaUnit.run(), true)
 end
 
--- unixcc: run='rm *.gcda; lua test.lua; gcov pb.c'
+-- unixcc: run='rm -f *.gcda; lua test.lua; gcov pb.c'
 -- win32cc: run='del *.gcda & lua test.lua & gcov pb.c'
